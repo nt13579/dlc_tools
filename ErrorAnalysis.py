@@ -25,6 +25,7 @@ import sys
 from pathlib import Path
 
 #Matplotlib Configuration
+import seaborn as sb
 import matplotlib
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
@@ -35,7 +36,7 @@ import sklearn.metrics as sk
 #True Positive, True Negative, False Positive, False Negative
 errorTypes = ['TP', 'TN', 'FP', 'FN']
 
-def quantifyErrors(trueLabels, testLabels,  filepath, threshold = .1, getParams=False, edit=True, coeff = 1):
+def quantifyErrors(trueLabels, testLabels,  filepath, threshold=.1, getParams=False, filter=True):
     """Short summary.
 
     Calculates the errors on the deeplabcut training and test data. Classifies each label as True
@@ -60,16 +61,26 @@ def quantifyErrors(trueLabels, testLabels,  filepath, threshold = .1, getParams=
         labels.
     getParams : type = boolean
         If true, returns a dictionary with parameters
+    filter : type = boolean
+        If true, will filter the test labels. Any True positive label with a distance greater than
+        (mean + 1.5*IQR) will be reclassified as a false positive and its corresponding
+        distance set to nan - IQR is interquartile range. The mean and IQR are calculated for each
+        individual label
 
     Returns
     -------
-    results: frame by frame description of the data and errors (Raw Error Analysis)
+    results : type = pandas
+        Columns: [Type] [[Label Names], [ErrorType, Confidence, Distance]]
+     frame by frame description of the data and errors (Raw Error Analysis)
+
     SnS: by label description of the data (Sensitivity and Specificity Matrix)
 
     (Optional Returns)
     parameters: {labels: [] of '', numLabels: int, numFrames: int }
 
     """
+    np.warnings.filterwarnings('ignore')
+
     trueLabels, testLabels = __checkInput(trueLabels, testLabels)
 
     #Ensures that the threshold is between 0 and 1
@@ -133,6 +144,8 @@ def quantifyErrors(trueLabels, testLabels,  filepath, threshold = .1, getParams=
     dist2 = np.full(numFrames*numLabels, np.nan)
     dist2[tp.flatten()] = dist  #Makes tp 1D in order to retrieve all tp indices to set to
                                 #corresponding distance
+
+    dist2[dist2>50] = math.nan
     dist2 = dist2.reshape(numFrames,numLabels)
 
     #Each label has three values: Error Type, Confidence, and distance. Thus the indexing by three.
@@ -141,25 +154,14 @@ def quantifyErrors(trueLabels, testLabels,  filepath, threshold = .1, getParams=
     results.iloc[:,2::3] = testConfidences
     results.iloc[:,3::3] = dist2
 
-    if edit:
-        resVals = results[results['Type']=='Test'].iloc[:,3::3].values
-        tempDist = resVals.flatten()
-        tempDist = tempDist[~np.isnan(tempDist)]
+    if filter:
+        resVals = results[results['Type']=='Test'].iloc[:,3::3]
 
-        bins = np.linspace(0,100,201) #.5 width bins
-        counts, bins2 = np.histogram(tempDist, bins=bins)
-        bins = bins2[1::] #removes 0 bin and makes counts and bins2 the same size
-        weights = np.multiply(bins,counts)
-        differences = []
-        for i in range(len(bins)):
-            tot1 = np.sum(weights[0:i])
-            tot2 = np.sum(weights[i::]) * coeff
-            differences.append(abs(tot2-tot1))
-        distThreshold = np.argmin(np.asarray(differences))/2
+        IQR = resVals.quantile(.75) - resVals.quantile(.25)
+        distThresholds =resVals.mean() + 1.5*IQR
 
-        #resVals = results[results['Type'] == 'Test'].iloc[:,3::3].values
-        np.warnings.filterwarnings('ignore')
-        resBool = resVals > distThreshold
+        resBool = (resVals > distThresholds).values
+        resVals = resVals.values
         resVals[resBool] = np.nan
         results.ix[results['Type'] == 'Test', 3::3] = resVals
         err = results.ix[results['Type'] == 'Test', 1::3].values
@@ -170,28 +172,20 @@ def quantifyErrors(trueLabels, testLabels,  filepath, threshold = .1, getParams=
                                          ['# Occurences','Avg Confidence']])
     SnS = pd.DataFrame(index = labels, columns = header) #Sns: Specificity and Sensitivity
 
-    for i, label in enumerate(labels):
-        trainCounts = []
-        testCounts = []
-        for errorType in errorTypes:
-            trainData = results[results['Type'] == 'Training'][label].values
-            testData = results[results['Type'] == 'Test'][label].values
-            trainCount = [0,math.nan] #[Number of Occurences, Avg Confidence]
-            testCount = [0,math.nan] #[Number of Occurences, Avg Confidence]
-            trainCount[0] = list(trainData[:,0]).count(errorType)
-            testCount[0] = list(testData[:,0]).count(errorType)
-            if(trainCount[0] > 0):
-                trainCount[1] = round(np.mean([trainData[trainData[:,0] == errorType][:,1]]), 4)
-            if(testCount[0] > 0):
-                testCount[1] = round(np.mean([testData[testData[:,0] == errorType][:,1]]), 4)
-            trainCounts.extend(trainCount)
-            testCounts.extend(testCount)
-        SnS.iloc[i] = trainCounts + testCounts
+    header = pd.MultiIndex.from_product([['Training', 'Test'], errorTypes])
+    SnS = pd.DataFrame(index = labels, columns = header) #Sns: Specificity and Sensitivity
+    SnS = SnS.fillna(0)
+
+    testErr = results[results['Type'] == 'Test'].iloc[:,1::3]
+    trainErr = results[results['Type'] == 'Training'].iloc[:,1::3]
+    for i, errorType in enumerate(errorTypes):
+        SnS.iloc[:,i] = (trainErr == errorType).sum().values
+        SnS.iloc[:,i+4] = (testErr == errorType).sum().values
 
     if(getParams):
         return results, SnS, parameters
     else:
-        return results,SnS
+        return results, SnS
 
 def testThresholds(trueLabels, testLabels, thresholds, filepath, edit=True, coeff= 1):
     """Short summary.
@@ -295,6 +289,106 @@ def testThresholds(trueLabels, testLabels, thresholds, filepath, edit=True, coef
 
 
     return avgOccurences, distances, snapshots
+
+def plotDistanceDistribution(trueLabels, testLabels, threshold, filepath, filter = True):
+
+    results, SnS, params = quantifyErrors(trueLabels, testLabels, filepath, getParams=True,
+                                            filter = filter)
+    sb.set(style="ticks")
+    f, (ax_box, ax_hist) = plt.subplots(2, sharex=True, gridspec_kw={"height_ratios": (.15, .85)})
+    bins = np.linspace(0,100,201) #.5 width bins
+
+    for i,label in enumerate(params['labels']):
+        tempResults = results[results['Type']=='Test'].iloc[:,(i+1)*3 ].values
+        x = tempResults[~pd.isnull(tempResults)]
+
+        sb.boxplot(x, ax=ax_box)
+        sb.distplot(x, ax=ax_hist, bins=bins)
+
+        ax_box.set(yticks=[])
+        sb.despine(ax=ax_hist)
+        sb.despine(ax=ax_box, left = True)
+
+        plt.title(label)
+        plt.xlim(0,50)
+        plt.xlabel('Distance (pixels)')
+        plt.waitforbuttonpress()
+        ax_box.clear()
+        ax_hist.clear()
+
+def violinplot(trueLabels, testLabels, filepath, filter = True, threshold=.1, ):
+    """
+    if filter != "compare" and isinstance(filter, (str)):
+        raise Exception('filter is an invalid string. It must be either a boolean or the string'
+                        ' "compare". You passed in filter: {}'.format(filter))
+    elif not isinstance(filter, boolean):
+        raise exception('filter is of the incorrect type. It must be either a boolean or the string'
+                        ' "compare". You passed in filter of type {}'.format(type(filter))
+    """
+    #Compares filter and filtered distance distrutions
+    if (filter == 'compare'):
+        resultsFilt, SnS, params = quantifyErrors(trueLabels,testLabels, filepath, getParams=True,
+                                                filter=True)
+        resultsRaw, SnSRaw = quantifyErrors(trueLabels,testLabels, filepath, getParams=False,
+                                            filter=False)
+
+        XFilt = resultsFilt[resultsFilt['Type']=='Test'].iloc[:,3::3]
+        labels = XFilt.columns.get_level_values(0)
+        XFilt.columns = XFilt.columns.droplevel(1)
+
+        XRaw = resultsRaw[resultsRaw['Type']=='Test'].iloc[:,3::3]
+        XRaw.columns = XRaw.columns.droplevel(1)
+
+        nR = pd.isnull(XRaw).sum().sum()
+        nF = pd.isnull(XFilt).sum().sum()
+        ndf2 = np.empty(((nR+nF), 3), dtype = object)
+        index = 0
+
+        #Reorganizing data so that it can be plotted using violin plots
+        for label in labels:
+            xR = XRaw[label].values
+            xR = xR[~pd.isnull(xR)]
+            xF = XFilt[label].values
+            xF = xF[~pd.isnull(xF)]
+
+            lenR = len(xR)
+            ndf2[index:index+lenR,0] = label
+            ndf2[index:index+lenR,1] = xR
+            ndf2[index:index+lenR,2] = "Unfiltered"
+            index += lenR
+
+            lenF = len(xF)
+            ndf2[index:index+lenF,0] = label
+            ndf2[index:index+lenF,1] = xF
+            ndf2[index:index+lenF,2] = "Filtered"
+            index += lenF
+
+        df = pd.DataFrame(columns = ['label', 'Distance', 'Filt'], data = ndf2)
+        sb.set(style="ticks")
+        df['Distance'] = df['Distance'].astype(float)
+        ax = sb.violinplot(y=df['label'], x=df['Distance'], data=df,split=True, hue='Filt', cut=0,
+                        inner="quartile", palette={"Filtered":'azure',"Unfiltered":'lightcoral'})
+        title = "Comparison of filtered and Unfiltered"
+
+    #No comparison of data, can be filtered or unfiltered distributions
+    else:
+        results, SnS, params = quantifyErrors(trueLabels,testLabels, filepath, getParams=True,
+                                                    filter=filter)
+        X = results[results['Type']=='Test'].iloc[:,3::3]
+        labels = X.columns.get_level_values(0)
+        X.columns = X.columns.droplevel(1)
+        sb.violinplot(data=X, orient = 'h', cut=0, inner='quartile')
+        plt.xlabel('Distance')
+        if filter:
+            title = "Filtered"
+        else:
+            title = "Unfiltered"
+
+
+    plt.title("{} Distance Distribution for each Label at threshold: {}".format(title, threshold))
+    plt.xlim(0,50)
+    plt.show()
+
 
 def plotSnS(trueLabels, testLabels, thresholds, filepath, snapshots=[] , save=True,
                normalize=True):
