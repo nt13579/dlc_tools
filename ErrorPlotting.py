@@ -5,6 +5,8 @@ import math
 import time
 import sys
 from pathlib import Path
+from dlc_tools import quantifyErrors, getLabelNames, testThresholds
+
 
 #Matplotlib Configuration
 import seaborn as sb
@@ -21,13 +23,13 @@ errorTypes = ['TP', 'TN', 'FP', 'FN']
 def plotDistanceDistribution(trueLabels, testLabels, filepath, threshold = .1, filter=True,
                             type='Test'):
 
-    results, SnS, params = quantifyErrors(trueLabels, testLabels, filepath, getParams=True,
-                                            filter = filter)
+    results, SnS = quantifyErrors(trueLabels, testLabels, filepath, filter = filter)
+    labels = getLabelNames(trueLabels)
     sb.set(style="ticks")
     f, (ax_box, ax_hist) = plt.subplots(2, sharex=True, gridspec_kw={"height_ratios": (.15, .85)})
     bins = np.linspace(0,100,201) #.5 width bins
 
-    for i,label in enumerate(params['labels']):
+    for i,label in enumerate(labels):
         tempResults = results[results['Type']==type].iloc[:,(i+1)*3 ].values
         x = tempResults[~pd.isnull(tempResults)]
 
@@ -59,10 +61,10 @@ def violinplot(trueLabels, testLabels, filepath, filter = True, threshold=.1,typ
     """
     #Compares filter and filtered distance distrutions
     if (filter == 'compare'):
-        resultsFilt, SnS, params = quantifyErrors(trueLabels,testLabels, filepath, getParams=True,
-                                                filter=True, threshold = threshold)
-        resultsRaw, SnSRaw = quantifyErrors(trueLabels,testLabels, filepath, getParams=False,
-                                            filter=False, threshold = threshold)
+        resultsFilt, SnS = quantifyErrors(trueLabels,testLabels, filepath, filter=True,
+                                            threshold = threshold)
+        resultsRaw, SnSRaw = quantifyErrors(trueLabels,testLabels, filepath, filter=False,
+                                            threshold = threshold)
 
         XFilt = resultsFilt[resultsFilt['Type']==type].iloc[:,3::3]
         labels = XFilt.columns.get_level_values(0)
@@ -104,8 +106,7 @@ def violinplot(trueLabels, testLabels, filepath, filter = True, threshold=.1,typ
 
     #No comparison of data, can be filtered or unfiltered distributions
     else:
-        results, SnS, params = quantifyErrors(trueLabels,testLabels, filepath, getParams=True,
-                                                    filter=filter, threshold = threshold)
+        results, SnS = quantifyErrors(trueLabels,testLabels, filepath, filter=filter, threshold = threshold)
         X = results[results['Type']==type].iloc[:,3::3]
         labels = X.columns.get_level_values(0)
         X.columns = X.columns.droplevel(1)
@@ -123,62 +124,62 @@ def violinplot(trueLabels, testLabels, filepath, filter = True, threshold=.1,typ
     plt.show()
 
 
-    def plotSnS(trueLabels, testLabels, thresholds, filepath, snapshots=[] , save=True,
-                   normalize=True, manual = True):
-        """Short summary.
+def plotSnS(trueLabels, testLabels, thresholds, filepath, snapshots=[] , save=True,
+               normalize=True, manual = True):
+    """Short summary.
 
-        Parameters
-        ----------
-        trueLabels : type
-            Description of parameter `trueLabels`.
-        testLabels : type
-            Description of parameter `testLabels`.
-        thresholds : type
-            Description of parameter `thresholds`.
-        filepath : type
-            Description of parameter `filepath`.
-        snapshots : type
-            Description of parameter `snapshots`.
-        save : type
-            Description of parameter `save`.
-        normalize : type
-            Description of parameter `normalize`.
+    Parameters
+    ----------
+    trueLabels : type
+        Description of parameter `trueLabels`.
+    testLabels : type
+        Description of parameter `testLabels`.
+    thresholds : type
+        Description of parameter `thresholds`.
+    filepath : type
+        Description of parameter `filepath`.
+    snapshots : type
+        Description of parameter `snapshots`.
+    save : type
+        Description of parameter `save`.
+    normalize : type
+        Description of parameter `normalize`.
 
-        Returns
-        -------
-        type
-            Description of returned object.
+    Returns
+    -------
+    type
+        Description of returned object.
 
-        """
+    """
 
-        matplotlib.use('WXAgg')
+    matplotlib.use('WXAgg')
 
-        #If you do not pass in the snapshots
-        if not snapshots:
-            avgOccurences, distances, snapshots = testThresholds(trueLabels, testLabels, filepath, thresholds)
+    #If you do not pass in the snapshots
+    if not snapshots:
+        avgOccurences, distances, snapshots = testThresholds(trueLabels, testLabels, filepath, thresholds)
 
-        plt.style.use('fivethirtyeight')
+    plt.style.use('fivethirtyeight')
 
-        #ani = FuncAnimation(plt.gcf(), __animate2, fargs=(snapshots, normalize, thresholds,), interval=2000)
+    #ani = FuncAnimation(plt.gcf(), __animate2, fargs=(snapshots, normalize, thresholds,), interval=2000)
 
-        fig = plt.figure(1)
+    fig = plt.figure(1)
 
-        for i in range(len(thresholds)):
-            if manual:
-                keypress = False
-                while not keypress:
-                    keypress = plt.waitforbuttonpress()
-            else:
-                plt.pause(1)
-            __animate(i,snapshots, normalize, thresholds)
+    for i in range(len(thresholds)):
+        if manual:
+            keypress = False
+            while not keypress:
+                keypress = plt.waitforbuttonpress()
+        else:
+            plt.pause(1)
+        __animate(i,snapshots, normalize, thresholds)
 
-        plt.close()
+    plt.close()
 
-        #Need to fix writer
-        #Writer = matplotlib.animation.writers['ffmpeg']
-        #writer = Writer(fps=1)
+    #Need to fix writer
+    #Writer = matplotlib.animation.writers['ffmpeg']
+    #writer = Writer(fps=1)
 
-        #plt.show()
+    #plt.show()
 
 def __animate(i, snapshots, normalize, thresholds):
     print(i) #Should be printed. Helps ensure plotting is occuring

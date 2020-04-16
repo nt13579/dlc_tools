@@ -39,7 +39,7 @@ def score(trueLabels, testLabels, filepath, thresholds, func = None):
         dist = np.asarray(distances['Test'].iloc[i, 2::2], dtype = 'float64')
         std = np.asarray(distances['Test'].iloc[i, 3::2], dtype = 'float64')
         if func == None:
-            func = "np.multiply( (3 / dist)**2, (TP+TN)) / numberTestFrames"
+            func = "np.multiply( (2 / dist)**2, (TP+TN)) / numberTestFrames"
         score  = eval(func)
 
         scores.iloc[i] = np.asarray(score)
@@ -53,6 +53,7 @@ def score(trueLabels, testLabels, filepath, thresholds, func = None):
         scoreSum += score
     finalScore = scoreSum / len(variableThresholds)
     return scores, labelScores, finalScore
+
 """
 def score(trueLabels, testLabels, filepath, thresholds=[], filter=True):
     occ, distances, snapshots = testThresholds(trueLabels, testLabels, filepath,

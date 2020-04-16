@@ -300,6 +300,9 @@ def getDataFromPCF(pcf, shuffle):
     trueDir +=  '/' + 'labeled-data'
     videos = os.listdir(trueDir) #All Vid Folders with Manual annotations
 
+    #Removes labeled folder duplicates if they exist
+    videos = [v for v in videos if not (v.endswith('labeled'))]
+
     #Parse through vid folders and extract the h5 files for each manually labeled video
     for i, path in enumerate(videos):
         tempPath = trueDir+ '/' + path
