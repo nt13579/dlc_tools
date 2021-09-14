@@ -37,7 +37,8 @@ import sklearn.metrics as sk
 #True Positive, True Negative, False Positive, False Negative
 errorTypes = ['TP', 'TN', 'FP', 'FN']
 
-def quantifyErrors(trueLabels, testLabels,  filepath, threshold=.1, filter=True):
+def quantifyErrors(trueLabels, testLabels, filepath = None, threshold=.1, filter=True, get_velocity = False,
+                    maxPixelCutoff = 50):
     """Short summary.
 
     Calculates the errors on the deeplabcut training and test data. Classifies each label as True
@@ -92,18 +93,31 @@ def quantifyErrors(trueLabels, testLabels,  filepath, threshold=.1, filter=True)
                         )
 
     #Parameters
-    maxPixelCutoff = 50
-
+#CHECK FOR CORRECTNESS WHY WOULD TEST BE Shorter, POSSIBLE BUG
+    if len(trueLabels) < len(testLabels):
+        testLabels = testLabels.iloc[0:len(trueLabels), :]
+    if len(testLabels) < len(trueLabels):
+        trueLabels = trueLabels.iloc[0:len(testLabels), :]
     labels = getLabelNames(trueLabels)
     numLabels = len(labels) #Number of Labels
-    numFrames = getFrameCount(filepath)['Total'] #Number of frames in the dataset
-
-    frameType = getFrameType(filepath) #Dictionary of frame names with Train or Test identifier
     header = pd.MultiIndex.from_product([labels, ['Error Type','Confidence', 'Distance']])
+
+    if filepath == None:
+        numFrames = len(trueLabels)
+        frame_idx = np.linspace(0, numFrames-1, numFrames, dtype = int)
+        frame_idx = [str(idx) for idx in frame_idx]
+        type = ['Test'] * numFrames
+        frameType = {}
+        frameType.update(zip(frame_idx, type))
+    else:
+        numFrames = getFrameCount(filepath)['Total'] #Number of frames in the dataset
+        frameType = getFrameType(filepath) #Dictionary of frame names with Train or Test identifier
     indices = list(frameType.keys())
     results = pd.DataFrame(index = indices, columns = header)
     results.insert(0, 'Type',frameType.values())
-    results = results.sort_index() #The results dataframe is nan except for the Type (Train or Test)
+
+    if filepath != None:
+        results = results.sort_index() #The results dataframe is nan except for the Type (Train or Test)
 
     #Convert Pandas to np array
     trueVals = trueLabels.values
@@ -149,29 +163,28 @@ def quantifyErrors(trueLabels, testLabels,  filepath, threshold=.1, filter=True)
 
     if filter:
         resVals = results[results['Type']=='Test'].iloc[:,3::3]
-
         IQR = resVals.quantile(.75) - resVals.quantile(.25)
         distThresholds =resVals.mean() + 1.5*IQR
-
+        #print(distThresholds)
         resBool = (resVals > distThresholds).values
         resVals = resVals.values
         resVals[resBool] = np.nan
-        results.ix[results['Type'] == 'Test', 3::3] = resVals
-        err = results.ix[results['Type'] == 'Test', 1::3].values
+        results.loc[results['Type'] == 'Test'].iloc[:,3::3] = resVals
+        err = results.loc[results['Type'] == 'Test'].values[:, 1::3]
         err[resBool] = 'FP'
-        results.ix[results['Type'] == 'Test', 1::3] = err
+        results.loc[results['Type'] == 'Test'].iloc[:,1::3] = err
+
         resVals = results[results['Type']=='Training'].iloc[:,3::3]
-
         IQR = resVals.quantile(.75) - resVals.quantile(.25)
         distThresholds =resVals.mean() + 1.5*IQR
 
         resBool = (resVals > distThresholds).values
         resVals = resVals.values
         resVals[resBool] = np.nan
-        results.ix[results['Type'] == 'Training', 3::3] = resVals
-        err = results.ix[results['Type'] == 'Training', 1::3].values
+        results.loc[results['Type'] == 'Training'].iloc[:,3::3] = resVals
+        err = results.loc[results['Type'] == 'Training'].values[:,1::3]
         err[resBool] = 'FP'
-        results.ix[results['Type'] == 'Training', 1::3] = err
+        results.loc[results['Type'] == 'Training'].iloc[:, 1::3] = err
 
     header = pd.MultiIndex.from_product([['Training', 'Test'], errorTypes])
     SnS = pd.DataFrame(index = labels, columns = header) #Sns: Specificity and Sensitivity
@@ -186,7 +199,7 @@ def quantifyErrors(trueLabels, testLabels,  filepath, threshold=.1, filter=True)
     return results, SnS
 
 
-def testThresholds(trueLabels, testLabels, filepath, thresholds = [], filter=True):
+def testThresholds(trueLabels, testLabels, filepath = None, thresholds = [], filter=True):
     """Short summary.
 
     Calculates the errors at several different thresholds
@@ -389,10 +402,10 @@ def checkThresholds(thresholds):
         thresholds = np.sort(np.asarray(thresholds))
 
         #Checks to make sure there is more than 1 value in thresholds
-        if thresholds.size == 1:
+        '''if thresholds.size == 1:
             raise Exception('thresholds is a singular value of {}, not an array or list of multiple '
                             'values'.format(thresholds))
-
+                            '''
         if thresholds.size == 0:
             raise Exception('thresholds is empty, must input an array or list of values for thresholds')
 

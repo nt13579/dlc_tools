@@ -20,7 +20,7 @@ import sklearn.metrics as sk
 #True Positive, True Negative, False Positive, False Negative
 errorTypes = ['TP', 'TN', 'FP', 'FN']
 
-def plotDistanceDistribution(trueLabels, testLabels, filepath, threshold = .1, filter=True,
+def plotDistanceDistribution(trueLabels, testLabels, filepath=None, threshold = .1, filter=True,
                             type='Test'):
 
     results, SnS = quantifyErrors(trueLabels, testLabels, filepath, filter = filter)
@@ -50,7 +50,7 @@ def plotDistanceDistribution(trueLabels, testLabels, filepath, threshold = .1, f
 
 
 
-def violinplot(trueLabels, testLabels, filepath, filter = True, threshold=.1,type='Test' ):
+def violinplot(trueLabels, testLabels, filepath=None, filter = True, threshold=.1,type='Test' ):
     """
     if filter != "compare" and isinstance(filter, (str)):
         raise Exception('filter is an invalid string. It must be either a boolean or the string'
@@ -73,8 +73,8 @@ def violinplot(trueLabels, testLabels, filepath, filter = True, threshold=.1,typ
         XRaw = resultsRaw[resultsRaw['Type']==type].iloc[:,3::3]
         XRaw.columns = XRaw.columns.droplevel(1)
 
-        nR = pd.isnull(XRaw).sum().sum()
-        nF = pd.isnull(XFilt).sum().sum()
+        nR = (~pd.isnull(XRaw)).sum().sum()
+        nF = (~pd.isnull(XFilt)).sum().sum()
         ndf2 = np.empty(((nR+nF), 3), dtype = object)
         index = 0
 
@@ -124,7 +124,7 @@ def violinplot(trueLabels, testLabels, filepath, filter = True, threshold=.1,typ
     plt.show()
 
 
-def plotSnS(trueLabels, testLabels, thresholds, filepath, snapshots=[] , save=True,
+def plotSnS(trueLabels, testLabels, thresholds, filepath=None, snapshots=[] , save=True,
                normalize=True, manual = True):
     """Short summary.
 

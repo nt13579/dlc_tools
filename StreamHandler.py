@@ -1,3 +1,19 @@
+"""
+deeplabcut wrapper class to process live streams in real time
+
+Created by Nicholas Thomas
+Last Edited 7/10/2020
+
+Notes:
+
+Function List:
+init(CamIdx, dropFrames=False)
+beginCapture(maxFrames = None, labelVideo = True, shuffle = 0, vidOut = False, fps = 30,
+             resizeFactor = None, outputDir = None, capStreamFps = False)
+getMetaData()
+getPoseData()
+
+"""
 
 import dlc_tools as dt
 import yaml
@@ -10,7 +26,9 @@ import numpy as np
 import os.path
 import argparse
 import tensorflow as tf
+import pdb
 
+from datetime import datetime
 from deeplabcut.pose_estimation_tensorflow.nnet import predict
 from deeplabcut.pose_estimation_tensorflow.config import load_config
 from deeplabcut.pose_estimation_tensorflow.dataset.pose_dataset import data_to_input
@@ -23,17 +41,46 @@ from queue import Queue
 from collections import OrderedDict as ordDict
 
 
+
 class StreamHandler:
-    def __init__(self, camIdx=0, dropFrames = False):
+    def __init__(self, camIdx, dropFrames = False):
+        """Short summary
+
+        Initializes stream handler object
+
+        Parameters
+        ----------
+        CamIdx : type = list of strings, list of integers, or integer
+            The camera or video reference(s) from which the streams will be pulled for labeling. On
+            a laptop, the webcam will generally be able to be referenced by passing in a 1 or 0
+            depending on the laptop. For videos, pass in a list of the full file path for each video
+            that you want to simultaneously analyze.
+        dropFrames : type = boolean
+            dropFrames is a flag that when set to true, the stream handler will not generate a
+            backlog of frames. It will pull the most recent frame available to process and label,
+            skipping any frames that were pulled while the previous was being processed. It will
+            essentially subsample the video stream at based on the processing rate if that rate is
+            below the framerate of the stream.
+        """
 
         #Storage structure for frames, Thinking can sequentially add frames for multiple cameras
-        self.queue = Queue()
-        self.stopped = False
-        self.curFrame = None #creates pointer to current frame
-        self.dropFrames = dropFrames
+        self.queue = Queue()    #Temporary frame storage, only used for retrieval
+        self.stopped = False    #Boolean stop for threaded frame retrieval
+        self.curFrames = []     #Current Frame or Batch of Frames pointer
+        self.dropFrames = dropFrames    #Flag to skip frames if processing speed is lower than
+                                        #stream speed
+        self.frameCounter = 0   #Number of total frames that have been retrieved from the stream
+        self.curIdx = 0         #The index of the current frame to process
+        #We have two references for indexing: frameCounter and curIdx. When Dropframes is true,
+        #frameCounter=curIdx as the current frame will be the most recently pulled frame. When
+        #dropFrames is false, frameCounter >= curIdx as there can be a backlog of frames to process
+        #and the current frame to process is not the most recently pulled frame
+        self.width = None
+        self.height = None
         self.meta = ordDict({
             'Frame Idx':[],
-            'Frame Read':[],
+            'Frame Read':[],    #Whether or not the frame was actually read, this can only be false
+                                #if dropFrames flag is set to True
             'Time Retrieved':[],
             'Time Read':[],
             'Time Processed':[],
@@ -42,176 +89,353 @@ class StreamHandler:
             'Displaying Time':[],
             'Total Time':[]
         })
-        self.frames = []
-        self.frameCounter = 0
-        self.curIdx = 0
 
-        #Will prevent file from being passed in
+        #If input for stream is an int, will convert into a list, might build in funciton to check
+        #all input types. ie if one string is passed in
         if isinstance(camIdx, int):
-            self.stream = cv2.VideoCapture(camIdx)#Initializing camera stream
-            (self.grabbed, self.frame) = self.stream.read()
-            self.curFrame = self.frame
-            self.startTime = time.time() #Reference time to calculate elapsed time
-            self.updateMeta()
+            camIdx = [camIdx]
 
-        elif isinstance(camIdx, []):
-            print("Multiple Camera handling to be implemented at a later date")
+        #Curframe will be set back to it initalization if a frame is read or replaced by the
+        #following frame if it had not yet been read; self.frame will only be replaced by the next read frame
+        if isinstance(camIdx, list):
+            self.streams = [] #input streams
+            self.poseData = []
+            self.frame = [] #most recently retrieved frame
+            self.streamCount = len(camIdx) #number of streams
+            self.multiple = self.streamCount > 1
+
+            for i, stream in enumerate(camIdx):
+                if not isinstance(stream, (int, str)):
+                    raise Exception('Each individual stream must be an int or string')
+                self.streams.append(cv2.VideoCapture(stream))
+                self.poseData.append([]) #initalizes empty lists for all pose data
+                (self.grabbed, frame) = self.streams[i].read()
+                self.frame.append(frame)
+                if self.height == None:
+                    self.height = np.shape(frame)[0]
+                if self.width == None:
+                    self.width = np.shape(frame)[1]
+            self.curFrame = self.frame
+            #self.updateMeta()
+
+        elif camIdx == None:
+            print("Initalizing empty Stream Handler")
         else:
             raise Exception('Invalid input for camIdx')
 
-    #starts thread to read frames
-    def startThread(self):
-        self.t = Thread(target=self.update)
-        self.t.daemon = True
-        self.t.start()
-        return self
+    #Add flag to labelVideo or just capture stream to be done
+    def beginCapture(self, maxFrames = None, labelVideo = True, shuffle = 0, vidOut = False, fps = 30,
+                    resizeFactor = None, outputDir = None, capStreamFps = False, printFPS = False):
 
-    def update(self):
-        while True:            #If thread is stopped, the loop will stop
-            #grabs next frame
-            self.frameCounter += 1
-            (self.grabbed, self.frame) = self.stream.read()
+        """Short Summary
+        Parameters
+        ----------
+        maxFrames : type = int
+            The maximum number of frames you want to collect and analyze
+        labelVideo : type = boolean
+            A flag which when true, will analyze each frame using deeplabcut and plot the labels
+            over the frames
+        shuffle : type = int
+            The Shuffle for which network iteration of deeplabcut to use
+        vidOut : type = boolean
+            A flag which when true, will save a video
+        resizeFactor : type = double
+            A double ranging from 0 to 1 which determines by what factor the frames are rescaled
+        outputDir : type = string
+            The filepath for which the video will be saved
+        capStreamFps : type = boolean
+            A flag which when true, will synthetically enforce a framerate on the frame retrieval
+            speed
+        """
 
-            #handling meta data
-            self.updateMeta()
+        if labelVideo:
+            sess, inputs, outputs, dlc_cfg = self.initializeDLC(shuffle = shuffle)
 
-            #Puts data in structures
-            self.queue.put_nowait(self.frame)
-            if (self.dropFrames):
-                self.curIdx += 1
-                self.curFrame = self.frame
+        self.maxFrames = maxFrames
 
-            if self.stopped:
-                print("Stopping")
-                self.t.join() #I think
-                break
+        #Ensures they are both ints
+        if not resizeFactor == None:
+            self.height = int(self.height * resizeFactor)
+            self.width = int(self.width * resizeFactor)
+        self.startTime = time.time() #time reference
 
+        if vidOut:
+            os.chdir(outputDir)
+            if(outputDir == None):
+                raise Exception('Tried to write output videos but no output directory was specified')
+            videoWriters = []
+            date = datetime.now()
+            date = str(date).split('.')[0]
+            for i in range(self.streamCount):
+                videoWriters.append(cv2.VideoWriter('cam{}-{}.avi'.format(i,date), cv2.VideoWriter_fourcc(*"MJPG"),
+                                    fps=fps, frameSize=(self.width, self.height)))
 
-    def read(self):
-        #only returns once a frame is available and returns a single frame
-        while True:
-            if self.dropFrames:
-                if len(self.curFrame) > 0:
-                    frame = self.curFrame
-                    self.curFrame = []
-                    self.meta['Frame Read'][self.curIdx] = True #might need to move meta update into main while loop
-                    return frame
+        if capStreamFps:
+            self.fps = fps
+        else:
+            self.fps = None
 
-            elif not self.queue.empty():
-                self.meta['Frame Read'][self.curIdx] = True
-                self.curIdx += 1
-                return self.queue.get_nowait()
-
-
-    def stop(self):
-        self.stopped = True
-
-    def beginCapture(self, maxFrames = None):
-        sess, inputs, outputs, dlc_cfg = self.initializeDLC()
         self.startThread()
-
         loopcount = 0
         timeArr = np.zeros((100))
         self.fpsArr = []
+
         while True:
-            if isinstance(maxFrames, int):
-                if self.frameCounter > maxFrames:
-                    break
+            if (not maxFrames == None and self.curIdx >= maxFrames) or  cv2.waitKey(1) == 27:
+                self.stopped = True
+                self.t.join() #I think this stops the thread properly. Need to look into more but it works
+                for stream in self.streams:
+                    stream.release()
+                if vidOut:
+                    for writer in videoWriters:
+                        writer.release()
+                cv2.destroyAllWindows()
+                break
 
             timeIdx = loopcount % 100
-
-#            if loopcount%100 == 0:
-#                start = time.time()
-#                loopcount = 0
-
-            if cv2.waitKey(1) == 27:
-                break  # esc to quit
-
+            #READING
             curIdx = self.curIdx #ensures all idx are consistent for current loop iterations
             frame = self.read()
-            self.meta['Time Read'][curIdx] = time.time() - self.startTime
+            #print(self.frameCounter, curIdx, len(self.meta['Frame Read']))
+            self.meta['Frame Read'][curIdx] = True #might need to move meta update into main while loop
 
-            pose = self.analyzeFrame(frame, sess, inputs, outputs, dlc_cfg)
-            procTime =  time.time() - self.startTime
-            self.meta['Time Processed'][curIdx] = procTime
+            if not resizeFactor == None:
+                for i in range(self.streamCount):
+                    frame[i] = cv2.resize(frame[i], None,fx=resizeFactor,fy=resizeFactor)
 
-            timeArr[timeIdx] = procTime
-            elapsedTime = timeArr[timeIdx] - timeArr[(timeIdx+1)%100] #%100 should account for edge case of 99
-            fps = 100 / elapsedTime
-            self.fpsArr.append(fps)
+            if labelVideo:
+                if not self.multiple:
+                    frame = frame[0] #goes from list to cv object
 
-            labeledFrame = self.labelFrame(frame, pose)
+                self.meta['Time Read'][curIdx] = time.time() - self.startTime
 
-            end = time.time()
-#            cv2.putText(labeledFrame, ("FPS: " + str(loopcount / (end-start))), (0,30), cv2.FONT_HERSHEY_SIMPLEX, .69, (0,0,0), thickness = 2, lineType=cv2.LINE_AA)
+                #PROCESSING
+                if self.multiple: #multiple streams
+                    poses = self.analyzeMultipleFrames(frame, sess, inputs, outputs, dlc_cfg)
+                    for i in range(self.streamCount):
+                        self.poseData[i].append(poses[i])
+                else:
+                    #list is of size 1, by indexing with 0, we pass in the frame array not list
+                    pose = self.analyzeFrame(frame, sess, inputs, outputs, dlc_cfg)
+                    self.poseData[0].append(pose)
 
-            cv2.imshow('my webcam', labeledFrame)
+                procTime =  time.time() - self.startTime
+                self.meta['Time Processed'][curIdx] = procTime
+
+                #FRAMERATE CALCULATIONS
+                timeArr[timeIdx] = procTime
+                elapsedTime = timeArr[timeIdx] - timeArr[(timeIdx+1)%100] #%100 should account for edge case of 99
+                fps = 100 / elapsedTime
+                self.fpsArr.append(fps)
+
+                #LABELING and DISPLAYING
+                if self.multiple:
+                    labeledFrames = self.labelMultipleFrames(frame, poses)
+                    for i in range(self.streamCount):
+                        cv2.imshow("Stream {}".format(i), labeledFrames[i])
+                        if vidOut:
+                            videoWriters[i].write(labeledFrames[i])
+                else:
+                    labeledFrame = self.labelFrame(frame, pose)
+                    cv2.imshow('my webcam', labeledFrame)
+                    if vidOut:
+                        videoWriters[0].write(labeledFrame)
+            else:
+                for i in range(self.streamCount):
+                    cv2.imshow("Stream {}".format(i), frame[i])
+                    if vidOut:
+                        videoWriters[i].write(frame[i])
+
             self.meta['Time Displayed'][curIdx] = time.time() - self.startTime
 
-#            sys.stdout.write('\r')
-#            sys.stdout.write(str(loopcount / (end-start)))
-#            sys.stdout.flush()
-            sys.stdout.write('\r')
-            sys.stdout.write(str(fps))
-            sys.stdout.flush()
+            if printFPS:
+                sys.stdout.write('\r')
+                sys.stdout.write(str(fps))
+                sys.stdout.flush()
             loopcount  += 1
-
-        cv2.destroyAllWindows()
-        self.stopped = True
-
-
-
-    def updateMeta(self):
-        self.meta['Frame Idx'].append(self.frameCounter)
-        self.meta['Frame Read'].append(False)
-        self.meta['Time Retrieved'].append(time.time() - self.startTime)
-        self.meta['Time Read'].append(np.nan)
-        self.meta['Time Processed'].append(np.nan)
-        self.meta['Time Displayed'].append(np.nan)
-        self.meta['Processing Time'].append(np.nan)
-        self.meta['Displaying Time'].append(np.nan)
-        self.meta['Total Time'].append(np.nan)
-        self.frames.append(self.frame)
+        return
 
     def getMetaData(self):
+        """Short Summary
+        Returns the meta data for the stream handler object and the processed video stream. The meta
+        data consists of time stamps and elapsed time for the different steps in the pipeline:
+        Retrieval, Reading, Processing, Displaying. Note that total elapsed time is measured using
+        the reading time stamp not the retrieval time stamp
+
+        Note: There appears to be a bug that if you call this method twice the second call will
+        sometimes have an additional row of nan values.
+
+        Returns
+        -------
+        metaData : type = pandas Dataframe
+            A dataframe containing all the time data associated with the pipeline
+        """
         timeproc = np.array(self.meta['Time Processed'])
         timedisp = np.array(self.meta['Time Displayed'])
         timeread = np.array(self.meta['Time Read'])
         self.meta['Processing Time'] = timeproc - timeread
         self.meta['Displaying Time'] = timedisp - timeproc
         self.meta['Total Time'] = timedisp - timeread
-        return pd.DataFrame.from_dict(self.meta)
+        metaData = pd.DataFrame.from_dict(self.meta)
+        return metaData
 
+    def getPoseData(self):
+        """Short Summary
+        Returns the pose estimations for all the processed frames. If dropFrames is false, that will
+        every frame in the stream. Note that the method will always return a list even if there is
+        only 1 stream
+
+        Returns
+        -------
+        poseDataFrames : type = list pandas Dataframe
+            A list of size N (number of streams) with a dataframe for each stream containing all of
+            the pose estimation data. Each label in each frame has an X and Y coordinate value
+            (based on the rescaled frame size) and a likelihood value (between 0 and 1).
+        """
+        poseDataFrames = []
+        bodyparts = np.repeat(self.bodyparts,3)
+        columnNames = ['X', 'Y', 'likelihood'] * len(self.bodyparts)
+        for i in range(self.streamCount):
+            rows, cols = np.shape(self.poseData)[1:3]
+            df = pd.DataFrame((np.reshape(self.poseData[i], (rows, cols*3 ))))
+            df.columns = pd.MultiIndex.from_arrays([bodyparts, columnNames])
+            poseDataFrames.append(df)
+        return posDataFrames
+
+#HELPER METHODS
+####################################################################################################
+
+    #Helper method that starts thread to read frames
+    def startThread(self):
+        self.t = Thread(target=self.update)
+        self.t.start()
+        return self
+
+    #Helper method to stop the threaded operations.
+    def stop(self):
+        self.stopped = True
+
+    #Helper method that is executed on a single thread. It will pull frames from the stream(s)
+    #and batch and enque the frames (FIFO).
+    def update(self):
+        start = time.time() #Reference time against which
+        while True:  #If thread is stopped, the loop will stop
+            if not self.maxFrames == None:
+                if self.frameCounter > (self.maxFrames):
+                    break
+            if self.stopped:
+                print("Stopping")
+                break
+
+            self.frameCounter += 1
+            frames = []
+
+            #grabs one frame from every stream and batches them in a list
+            for stream in self.streams:
+                (grabbed, frame) = stream.read()
+                frames.append(frame)
+
+            #curIdx is incremented here when dropFrames flag is true as it retrieves the most recent frame
+            if (self.dropFrames):
+                self.curIdx += 1
+                self.curFrames = frames
+
+            end = time.time()
+
+            #This will impose an artifical framerate on frame pulling if an fps is designated in the
+            #beginCapture method. This is can help better approximate a livestream from a video for
+            #testing and evaluation purposes.
+            if not self.fps == None and grabbed:
+                elapsedTime = end-start
+                if elapsedTime < (1/self.fps):
+                    time.sleep(1/self.fps - elapsedTime)
+                start = time.time()
+
+            self.queue.put_nowait(frames)
+            self.updateMeta()
+
+        return self
+
+    #Helper method which will pull frames from the queue and return that list of frame(s)
+    def read(self):
+        #only returns once a frame or list of frames (1 frame from each stream) is available
+        while True:
+            if self.dropFrames:
+                if len(self.curFrames) > 0: #curFrame will be an empty array if it has been
+                                            #retrieved and there is not a new frame available
+                    frame = self.curFrames
+                    self.curFrame = []
+                    return frame
+            #curIdx for when dropFrames flag is False is incremented here as there can be a backlog
+            #of frames
+            elif not self.queue.empty():
+                self.meta['Frame Read'][self.curIdx] = True
+                self.curIdx += 1
+                frame = self.queue.get_nowait()
+                return frame
+
+    #Helper method that adds another row to the meta data, initalizing the values. Note that the
+    #meta data is the time stamps and elapsed time for each of the steps in the pipeline
+    def updateMeta(self):
+        self.meta['Frame Idx'].append(self.frameCounter) #frame idx in progress
+        self.meta['Frame Read'].append(False) #frames have not been read yet
+        self.meta['Time Retrieved'].append(time.time() - self.startTime) #time pulled from stream
+        self.meta['Time Read'].append(np.nan) #time frame is read
+        self.meta['Time Processed'].append(np.nan) #time after deeplabcut processing
+        self.meta['Time Displayed'].append(np.nan) #time frame is displayed with opencv
+        self.meta['Processing Time'].append(np.nan) #time elapsed to process
+        self.meta['Displaying Time'].append(np.nan) #time elapsed to dispaly
+        self.meta['Total Time'].append(np.nan) #total time from reading to displaying the frame
+        return
+
+    #Uses Deeplabcut to analyze a single frame and outputes the pose estimation data
     def analyzeFrame(self, frame, sess, inputs, outputs, dlc_cfg):
         frame = img_as_ubyte(frame)
         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         pose = predict.getpose(frame, dlc_cfg, sess, inputs, outputs)
         return pose
 
-    def labelFrame(self, frame, pose, threshold = .1):
+    #Uses Deeplabcut to analyze a batch of frames and outputes the pose estimation data for each
+    #frame
+    def analyzeMultipleFrames(self, frames, sess, inputs, outputs, dlc_cfg):
+        frames = [img_as_ubyte(f) for f in frames]
+        frames = [cv2.cvtColor(f, cv2.COLOR_BGR2RGB) for f in frames]
+        poses  = predict.getposeNP(frames, dlc_cfg, sess, inputs, outputs)
+        return poses
+
+    #Adds label markers to a single frame for each detected label
+    def labelFrame(self, frame, pose, threshold = .1, resizeFactor = 1):
         poseBool = pose[:, 2] > threshold
         labelCoords = pose[poseBool, 0:2]
         curBodyparts = self.bodyparts[poseBool]
         for i, bodypart in enumerate(curBodyparts):
             #cv2.circle(frame, (int(points[i,0]), int(points[i,1])), 2, color = (255,255,255), thickness =2)
-             cv2.putText(frame, bodypart, (int(labelCoords[i,0]), int(labelCoords[i,1])), cv2.FONT_HERSHEY_SIMPLEX, .69, (255,255,255), thickness = 2, lineType=cv2.LINE_AA)
+             cv2.putText(frame, bodypart, (int(labelCoords[i,0]), int(labelCoords[i,1])), cv2.FONT_HERSHEY_SIMPLEX, .69 * resizeFactor, (255,255,255), thickness = 2, lineType=cv2.LINE_AA)
         return frame
 
+    #Adds label markers to multiple frames for each detected label
+    def labelMultipleFrames(self, frames, poses, threshold = .1):
+        labeledFrames = []
+        for i, pose in enumerate(poses):
+            poseBool = pose[2::3] > threshold
+            xCoords = pose[0::3][poseBool]
+            yCoords = pose[1::3][poseBool]
+            curBodyparts = self.bodyparts[poseBool]
 
+            frame = frames[i]
+            for j, bodypart in enumerate(curBodyparts):
+            #cv2.circle(frame, (int(points[i,0]), int(points[i,1])), 2, color = (255,255,255), thickness =2)
+                cv2.putText(frame, bodypart, ( int(xCoords[j]), int(yCoords[j]) ), cv2.FONT_HERSHEY_SIMPLEX, .69, (255,255,255), thickness = 2, lineType=cv2.LINE_AA)
+            labeledFrames.append(frame)
+        return labeledFrames
 
-
+#Adapted Directly from DeepLabcut: This is the network initalization step
 ####################################################################################################
-    def initializeDLC(self, shuffle=0, config = None):
-        videotype='avi';
-        shuffle=0
-        trainingsetindex=0;
-        gputouse=0;
-        save_as_csv=False;
-        destfolder=None;
-        batchsize=1;
-        crop=None;
-        TFGPUinference=True;
-        dynamic=(False, .5, 10)
+    def initializeDLC(self, config=None, videotype='avi', shuffle=0, trainingsetindex=0, gputouse=0,
+                    save_as_csv=False, destFolder=None, crop=None, TFGPUinference=True,
+                    dynamic=(False, .5, 10)):
+
+        batchsize=self.streamCount;
 
         #Temporary hardcoded file path
         if config == None:
@@ -236,7 +460,6 @@ class StreamHandler:
             dlc_cfg = load_config(str(path_test_config))
         except FileNotFoundError:
             raise FileNotFoundError("It seems the model for shuffle %s and trainFraction %s does not exist."%(shuffle,trainFraction))
-
         # Check which snapshots are available and sort them by # iterations
         try:
           Snapshots = np.array([fn.split('.')[0]for fn in os.listdir(os.path.join(modelfolder , 'train'))if "index" in fn])
@@ -263,7 +486,8 @@ class StreamHandler:
         trainingsiterations = (dlc_cfg['init_weights'].split(os.sep)[-1]).split('-')[-1]
         # Update number of output and batchsize
         dlc_cfg['num_outputs'] = cfg.get('num_outputs', dlc_cfg.get('num_outputs', 1))
-        batchsize = 1
+        dlc_cfg['batch_size']=batchsize
+
         if dynamic[0]: #state=true
             #(state,detectiontreshold,margin)=dynamic
             print("Starting analysis in dynamic cropping mode with parameters:", dynamic)
@@ -296,5 +520,5 @@ class StreamHandler:
         tmpcfg = yaml.load(stream)
         bodyparts = tmpcfg['bodyparts']
         self.bodyparts = np.array(bodyparts)
+        self.sess = sess
         return sess, inputs, outputs, dlc_cfg
-        #out = cv2.VideoWriter('outpy.avi',cv2.VideoWriter_fourcc('M','J','P','G'), fps, (width,height))

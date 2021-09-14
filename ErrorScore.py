@@ -27,11 +27,13 @@ def score(trueLabels, testLabels, filepath, thresholds, func = None):
 
     labels = getLabelNames(testLabels)
     scores = pd.DataFrame(index = thresholds, columns = labels )
-    numberTestFrames = getFrameCount(filepath)['Test']
+    if filepath ==None:
+        numberTestFrames = len(results)
+    else:
+        numberTestFrames = getFrameCount(filepath)['Test']
 
     for i, s in enumerate(snapshots):
         S = s['Test'].values
-        print(S)
         TP = S[:,0]
         TN = S[:,1]
         FP = S[:,2]
@@ -39,7 +41,7 @@ def score(trueLabels, testLabels, filepath, thresholds, func = None):
         dist = np.asarray(distances['Test'].iloc[i, 2::2], dtype = 'float64')
         std = np.asarray(distances['Test'].iloc[i, 3::2], dtype = 'float64')
         if func == None:
-            func = "np.multiply( (2 / dist)**2, (TP+TN)) / numberTestFrames"
+            func = "np.multiply( (12 / dist)**2" #, (TP+TN)) / numberTestFrames"
         score  = eval(func)
 
         scores.iloc[i] = np.asarray(score)
