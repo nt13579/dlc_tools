@@ -113,15 +113,24 @@ def evaluate_frames(error_data, min_points = 18, total_points = 24, dist_compara
 def calc_vel(data, missing_value = -1, threshold = .9):
     """Short summary.
 
+    Calculates the velocities of each point between frames. It assigns the missing value to labels
+    that have a confidence lower than the threshold. This method takes in the resuls dataframe
+    outputted from the quanitfyErrors method.
 
     Parameters
     ----------
-
+    data : type = pandas
+        The results dataframe outputted from the quanitfyErrors method
+    missing_value : type = int
+        The value used to replace the velocity for labels with a likelihood lower than the threshold
+        -1 was assigned as the default as no velocity can have a negative value
+    threshold : type = double
+        The threshold for which likelihood must be greater for a label to be included
 
     Returns
     -------
-
-
+    vel : type = np.array
+        The velocities of each label for each frame. Each row represents a frame
     """
     x_coords = data.iloc[:, 0::3].values
     y_coords = data.iloc[:, 1::3].values
@@ -140,14 +149,35 @@ def calc_vel(data, missing_value = -1, threshold = .9):
 def getInputOutput(vid_names, DATA, min_points, dist_comparator):
     """Short summary.
 
+    Takes in DATA (a dictionary containing the true and test labels for a series of videos) and
+    formats it for use in an SVM. It generates the inputs (velocities) and outputs (frame quality).
+    Frame quality is a binary value where 1 represents "well labeled" and 0 is a bad frame.
 
     Parameters
     ----------
+    vid_names : type = list
+        A list of the names of videos for which you want to format
+    DATA : type = dictionary of dictionaries
+        DATA is a 2 level dictionary. The first level keys is the name of videos. Each video has
+        another dictionary with 2 more keys: 'True' and 'Test'. 'True' has a panda of the manually
+        labeled ground truth data. 'Test' has a panda of the network generated labels.
+        EX: DATA = {Vid1:{True:vid1_manual_labels, Test:vid1_network_labels},
+                    Vid2:{True:vid2_manual_labels, Test:vid2_network_labels}...}
 
-
+    min_points : type = int
+        Number of points that must be correct for a frame to be considered "well labeled".
+    dist_comparator : type = int
+        Max distance for a true positive label. If the distance for a label exceeds this value it
+        will be reclassified as false positive.
     Returns
     -------
-
+    input : type = np.array
+        An array of velocities where each row is a frame
+    output : type = np.array
+        An 1 column array of 1 and 0 representing frame quality
+    vid_idx : type = dictionary
+        A dictionary where each key is a video name and the values contain the index of the rows
+        that correspond to that video in the input and output arrays.
 
         """
     frame_evals=[]
@@ -180,14 +210,29 @@ def getInputOutput(vid_names, DATA, min_points, dist_comparator):
 def test_model(input_data, output, count = 3, print_loop=True, print_mean = True, get_meta = False):
     """Short summary.
 
+    Trains and tests a series of SVM classifiers.
 
     Parameters
     ----------
-
+    input_data: type = np.array
+        An array of velocities as outputted by getInputOutput
+    output: type = np.array
+        An array of frame evaluations as outputted by getInputOutput
+    count: type = int
+        How many models to train and test
+    print_loop: type = boolean
+        Toggles whether to prints each models statistics
+    print_mean: type = boolean
+        Toggles whether to print the average model performance
+    get_meta: type = boolean
+        Whether to return the meta data
 
     Returns
     -------
-
+    scores: type = list
+        A list of the scores for the models
+    meta (optional): type = dictionary
+        The meta data for each model.
 
     """    scores = []
     meta = {}
@@ -241,9 +286,34 @@ def test_model(input_data, output, count = 3, print_loop=True, print_mean = True
         return scores, meta
     else:
         return scores
+ere s
 
-#Retrieves the labeling files in the vid dir, defaults to fully labeled data folder
 def getData(shuffle, keyword = 'Iterative', manual_only = False, username = 'beastmode', vid_dir = None):
+    """Short summary.
+
+    Retrieves the labeling files in the vid dir, defaults to fully labeled data folder and formats
+    them into DATA
+
+    Parameters
+    ----------
+    shuffle: type = int
+        The shuffle corresponding the the network iteration you want to retrieve files from
+    keyword: type = str
+        The keyword associated with the project name. Note this should be unique for each project
+        to differentiate iterations. If your keyword is contained in a different project name that
+        you are not intending to use, it will incorrectly retrieve files.
+    manual_only: type = boolean
+        Toggles whterh you only retrieve the manually labeled files
+    username: type = str
+        Name of the computer
+    vid_dir: type = str
+        Directory where you have stored all of your data. Refer to associated documentation for file
+        structure. Currently defaults to /DeepLabCut/Fully Labeled Data/Model 1 Videos/Test/
+
+    Returns
+    -------
+    DATA: type = dictionary of dictionaries
+    """
     if vid_dir == None:
         videos_dir = '/home/{}/DeepLabCut/Fully Labeled Data/Model 1 Videos/Test/'.format(username)
         base_dir = '/home/{}/DeepLabCut/'.format(username)
@@ -270,17 +340,40 @@ def getData(shuffle, keyword = 'Iterative', manual_only = False, username = 'bea
             DATA[vid]['Test'] = pd.read_hdf(test_data_path).iloc[0:len( DATA[vid]['True'])]
     return DATA
 
-def getPredictions(train_vid_names, DATA, model):
+def getPredictions(vid_names, DATA, model):
+    """Short summary.
+
+    Makes predictions of whether frames are good or bad using the trained SVM model
+
+    Parameters
+    ----------
+    vid_names: type = list
+        List of the videos that you want to evaluate
+    DATA: type = dictionary of dictionaries
+        Output of getData
+    model: type = SVM model
+        The loaded model of the SVM. Note the model must be intitalized outside of the method and
+        then passed in.
+
+    Returns
+    -------
+    predictions: np.array
+        Array of binary predictions of frame quality
+    cutoffs: type = dictionary
+        A dictionary of which indices are corresponding to which video
+    frame_count: type = dictionary
+        A dictionary of the number of frames in each video
+    """
     data = []
     Y = {}
     frame_count = {}
     cutoffs = {}
     count = 0
 
-    for vid in train_vid_names:
+    for vid in vid_names:
         data = DATA[vid]['Test']
         frame_count[vid] = len(data.index)
-        vels = calc_vel(data, threshold = .5)
+        vels = calc_vel(data, threshold = .9)
         y_pred = model.predict(vels)
         Y[vid] = y_pred
 
@@ -292,8 +385,33 @@ def getPredictions(train_vid_names, DATA, model):
 
     return predictions, cutoffs, frame_count
 
-'''
+
 def getFrames(cutoffs, predictions, svm_train_data, train_vid_names, frame_count, num2pick = 50):
+    """Short summary.
+
+    Retrieves a number of frames that have poor network performance. Note this implementation is to
+    be used for the SVM. For ranked prediction refer to the get_frames method outline in the
+    iterative training framework template jupyter notebook.
+
+    Parameters
+    ----------
+    cutoffs: type = dictionary
+        A dictionary containing the associated indices for each video. Output of getPredictions
+    predictions: type = array
+        An array of binary predictions on frame quality. Output of getPredictions
+    svm_train_data: type = dictionary
+        A dictionary containing which frames for each video were used in training the SVM.
+    frame_count: type = dictionary
+        Number of frames in each video
+    num2pick: type = int
+        Number of frames to be selected
+
+    Returns
+    -------
+    sorted_frames: dtype = dictionary
+        A dictionary that contains the frame indices from each video for each frame that was selected
+
+    """
     with open('/home/beastmode/DeepLabCut/Iterative_Training-Nick_T-2021-05-31/past_frame_idx.pickle', 'rb') as file:
         past_frame_idx = pickle.load(file)
 
@@ -361,9 +479,26 @@ def getFrames(cutoffs, predictions, svm_train_data, train_vid_names, frame_count
             frames.append(prfx+str(frame)+sfx)
         sorted_frames[vid] = frames
     return sorted_frames
-'''
-def updateConfig(train_vids, dlc_dir):
 
+
+def updateConfig(train_vids, dlc_dir):
+    """Short summary.
+
+    Updates the dlc configuration file if any frames are being added from videos that were initially
+    not in the config
+
+    Parameters
+    ----------
+    train_vids: type = list
+        List of video names that were used for getting new frames
+    dlc_dir: type = str
+        Path to the dlc directory
+
+    Returns
+    -------
+    scorer: type = str
+        Name of scorer in the dlc config file
+    """
     os.chdir(dlc_dir)
     cfg = dlc_dir + '/config.yaml'
     yaml = ruamel.yaml.YAML()
@@ -388,6 +523,34 @@ def updateConfig(train_vids, dlc_dir):
 
 def updateTrainingData(shuffle, pcf, DATA, train_vid_names, sorted_frames, dlc_dir, trainingset_dir,
                         scorer = 'Nick_T'):
+    """Short summary.
+
+    Adds selected frames to the training data
+
+    Parameters
+    ----------
+    shuffle: type = int
+        Shuffle index corresponding to which network iteration you are on
+    pcf: type = str
+        Path to the configuration file
+    DATA: type = dictionary of dictionaries
+        DATA as outputted by getData
+    train_vid_names: type = list
+        List of videos used in selecting new frames
+    sorted_frames: type = dictionary
+        New frames to be added. Output of getFrames
+    dlc_dir: type = str
+        Path to the dlc project folder
+    trainingset_dir: type = str'
+        Path to the directory of all of the trianing sets
+    scorer: type = str
+        Name of the scorer as outlined in the dlc config file
+
+    Returns
+    -------
+    None
+
+    """
     curdir = dlc_dir + '/labeled-data/'
     frame_meta_files = [file for file in os.listdir(trainingset_dir) if 'CollectedData' in file]
 
@@ -437,6 +600,22 @@ def updateTrainingData(shuffle, pcf, DATA, train_vid_names, sorted_frames, dlc_d
     dlc.create_training_dataset(pcf, Shuffles=[shuffle], net_type = 'mobilenet_v2_1.0')#, trainIndexes=[train_indices], testIndexes=[test_indices])
 
 def getCutoffs(train_vid_names, DATA):
+    """Short summary.
+
+    Returns the associated indices for each video
+
+    Parameters
+    ----------
+    train_vid_names: type = list
+        List of video names
+    DATA: type = dictionary of dictionaries
+        DATA as outputted by getData
+
+    Returns
+    -------
+    cutoffs: type = dictionary
+        A dictionary which contains the associated indices in DATA for each video
+    """
     cutoffs = {}
     count = 0
 
@@ -448,12 +627,13 @@ def getCutoffs(train_vid_names, DATA):
 
     return cutoffs
 
+#Converts from a video to a numerical idx
 def adjust_idx(vid, cutoffs, idx):
     cutoff = cutoffs[vid]
     idx = np.asarray(idx) + cutoff[0]
     return idx
 
-
+#Converts from idx to a dictonary of videos
 def idx_to_vid(idx, cutoffs, scores = []):
     sorted_frames = {}
     sorted_scores = {}
